@@ -457,6 +457,9 @@ static int devnullfd = -1;
 static time_t gtimesecs;
 static uint_t idletimeout, selbufpos, selbuflen;
 static ushort_t xlines, xcols;
+static bool pane_mode, parent_hidden;
+static int list_left, list_right, preview_border;
+static int visible_contexts[CTX_MAX], visible_context_count;
 static ushort_t idle;
 static uchar_t maxbm, maxplug, maxorder;
 static uchar_t cfgsort[CTX_MAX + 1];
@@ -866,6 +869,9 @@ static const char * const patterns[] = {
 #define C_SOC (C_PIP + 1)   /* Socket: MediumOrchid1 */
 #define C_UND (C_SOC + 1)   /* Unknown OR 0B regular/exe file: Red1 */
 
+#define C_PANE_HOVER 290
+#define C_PANE_IMAGE 300
+
 static const char gcolors[] = "c1e2272e006033f7c6d6abc4";
 static uint_t fcolors[C_UND + 1] = {0};
 
@@ -892,7 +898,7 @@ static haiku_nm_h haiku_hnd;
 
 /* Function macros */
 #define tolastln() move(xlines - 1, 0)
-#define tocursor() move(cur + 2 - curscroll, 0)
+#define tocursor() move(cur + 2 - curscroll, list_left)
 #define exitcurses() endwin()
 #define istopdir(path) ((path)[1] == '\0' && (path)[0] == '/')
 #define settimeout() timeout(1000)
@@ -2504,7 +2510,12 @@ static bool initcurses(void *oldmask)
 				*pcode = 4;
 
 			init_pair(i + 1, *pcode, -1);
+			if (pane_mode && COLOR_PAIRS > C_PANE_HOVER + i)
+				init_pair(C_PANE_HOVER + i, COLOR_BLACK, *pcode);
 		}
+		if (pane_mode && COLORS >= COLOR_256 && COLOR_PAIRS >= C_PANE_IMAGE + 216)
+			for (short i = 0; i < 216; ++i)
+				init_pair(C_PANE_IMAGE + i, 16 + i, -1);
 	}
 #ifdef ICONS_ENABLED
 	if (!g_state.oldcolor) {
@@ -4938,12 +4949,12 @@ static void print_icon(const struct entry *ent, const int attrs)
 {
 	const struct icon icon = get_icon(ent);
 	addstr(ICON_PADDING_LEFT);
-	if (icon.color)
+	if (icon.color && !pane_mode)
 		attron(COLOR_PAIR(C_UND + 1 + icon.color));
 	else if (attrs)
 		attron(attrs);
 	addstr(icon.icon);
-	if (icon.color)
+	if (icon.color && !pane_mode)
 		attroff(COLOR_PAIR(C_UND + 1 + icon.color));
 	else if (attrs)
 		attroff(attrs);
@@ -5137,7 +5148,7 @@ static void printent(int pdents_index, uint_t namecols, bool sel)
 	char ind = '\0';
 	int attrs;
 
-	if (cfg.showdetail) {
+	if (cfg.showdetail && !pane_mode) {
 		int type = ent->mode & S_IFMT;
 		char perms[6] = {' ', ' ', (char)('0' + ((ent->mode >> 6) & 7)),
 				(char)('0' + ((ent->mode >> 3) & 7)),
@@ -6522,6 +6533,8 @@ static void show_help(const char *path)
 	for (uchar_t i = 0; i < CTX_MAX; ++i)
 		if (g_ctx[i].c_cfg.ctxactive)
 			fprintf(f, " %u%c %s\n", i + 1, (cfg.curctx == i) ? '*' : ' ', g_ctx[i].c_path);
+	if (pane_mode)
+		fprintf(f, "\nPANES\n [  Parent pane\n P  Preview pane\n :  Go to directory\n");
 
 	fprintf(f, "\nVOLUME: avail:%s ", coolsize(get_fs_info(path, VFS_AVAIL)));
 	fprintf(f, "used:%s ", coolsize(get_fs_info(path, VFS_USED)));
@@ -8143,7 +8156,7 @@ static void statusbar(char *path)
 
 static inline void markhovered(void)
 {
-	if (cfg.showdetail && ndents) { /* Bold forward arrowhead */
+	if (!pane_mode && cfg.showdetail && ndents) { /* Bold forward arrowhead */
 		tocursor();
 #if defined(NOBRAILLE) && defined(ICONS_ENABLED)
 		addstr("▌");
@@ -8410,13 +8423,66 @@ static void preview_pane(const char *path)
 	}
 }
 
+#include "panes.h"
+
+static void layout_panes(const char *path)
+{
+	list_left = 0;
+	list_right = xcols;
+	preview_border = 0;
+	if (!pane_mode) {
+		if (cfg.preview && PREVIEW_WIDTH >= MIN_PREVIEW_COLS)
+			list_right = PREVIEW_BORDER_COL;
+		return;
+	}
+
+	if (xlines < 6)
+		return;
+	if (!parent_hidden && !istopdir(path) && xcols >= 96)
+		list_left = MIN(26, xcols / 6);
+	if (cfg.preview && xcols >= 74) {
+		preview_border = xcols - xcols * 2 / 5;
+		list_right = preview_border;
+	}
+}
+
+static bool pane_details(void)
+{
+	return pane_mode && cfg.showdetail && list_right - list_left >= 42;
+}
+
+static void print_browser_entry(int index, int columns, bool current)
+{
+	int row = getcury(stdscr);
+	printent(index, columns, current && !pane_mode);
+	if (pane_details()) {
+		const struct entry *entry = &pdents[index];
+		move(row, list_right - 24);
+		attron(A_DIM | COLOR_PAIR(C_MIS));
+		print_time(&entry->sec, 0);
+		printw(" %6s", coolsize(entry->size));
+		attroff(A_DIM | COLOR_PAIR(C_MIS));
+	}
+	if (pane_mode && current) {
+		short pair = C_PANE_HOVER + cfg.curctx;
+		if (COLOR_PAIRS > pair)
+			mvchgat(row, list_left, list_right - list_left, A_BOLD, pair, NULL);
+		else
+			mvchgat(row, list_left, list_right - list_left, A_REVERSE, 0, NULL);
+	}
+}
+
 static int adjust_cols(int n)
 {
 	/* Calculate the number of cols available to print entry name */
 #ifdef ICONS_ENABLED
 	n -= (g_state.oldcolor ? 0 : ICON_SIZE + ICON_PADDING_LEFT_LEN + ICON_PADDING_RIGHT_LEN);
 #endif
-	if (cfg.showdetail) {
+	if (pane_mode && g_state.showlines)
+		n -= 4;
+	if (pane_details())
+		n -= 25;
+	else if (cfg.showdetail && !pane_mode) {
 		/* Fallback to light mode if less than 35 columns */
 		if (n < 36)
 			cfg.showdetail ^= 1;
@@ -8467,14 +8533,8 @@ static void draw_line(int ncols)
 static void redraw(char *path)
 {
 	getmaxyx(stdscr, xlines, xcols);
-
-	int ncols = (xcols <= PATH_MAX) ? xcols : PATH_MAX;
-	/* Limit listing width when preview pane is active */
-	if (cfg.preview && xcols >= ((MIN_PREVIEW_COLS * 2) + 1)) {
-		int listcols = PREVIEW_BORDER_COL;
-		if (ncols > listcols)
-			ncols = listcols;
-	}
+	layout_panes(path);
+	int ncols = MIN(list_right - list_left, PATH_MAX);
 	int i, j = 1;
 
 	// Fast redraw
@@ -8482,7 +8542,7 @@ static void redraw(char *path)
 		g_state.move = 0;
 
 		if (ndents && (last_curscroll == curscroll)
-		    && !cfg.preview)
+		    && !cfg.preview && !pane_mode)
 			return draw_line(ncols);
 	}
 
@@ -8503,7 +8563,12 @@ static void redraw(char *path)
 	//DPRINTF_D(cur);
 	DPRINTF_S(path);
 
-	for (i = 0; i < CTX_MAX; ++i) { /* 8 chars printed for contexts - "1 2 3 4 " */
+	move(0, list_left);
+	visible_context_count = 0;
+	for (i = 0; i < CTX_MAX; ++i) {
+		if (pane_mode && !g_ctx[i].c_cfg.ctxactive)
+			continue;
+		visible_contexts[visible_context_count++] = i;
 		if (!g_ctx[i].c_cfg.ctxactive)
 			addch(i + '1');
 		else
@@ -8513,6 +8578,7 @@ static void redraw(char *path)
 
 		addch(' ');
 	}
+	int context_columns = 2 * visible_context_count;
 
 	attron(A_UNDERLINE | COLOR_PAIR(cfg.curctx + 1));
 
@@ -8521,7 +8587,11 @@ static void redraw(char *path)
 	char *ptr = in_home ? &path[homelen - 1] : path;
 
 	i = (int)xstrlen(ptr);
-	if ((i + MIN_DISPLAY_COL) <= ncols)
+	if (pane_mode) {
+		if (i > ncols - context_columns)
+			ptr = xbasename(path);
+		pane_text(ptr, strlen(ptr), ncols - context_columns);
+	} else if ((i + MIN_DISPLAY_COL) <= ncols)
 		addnstr(ptr, ncols - MIN_DISPLAY_COL);
 	else {
 		char *base = xmemrchr((uchar_t *)ptr, '/', i);
@@ -8560,7 +8630,7 @@ static void redraw(char *path)
 
 	/* Go to first entry */
 	if (curscroll > 0) {
-		move(1, 0);
+		move(1, list_left);
 #ifdef ICONS_ENABLED
 		addstr(ICON_ARROW_UP);
 #else
@@ -8580,12 +8650,12 @@ static void redraw(char *path)
 
 	/* Print listing */
 	for (i = curscroll; i < onscreen; ++i) {
-		move(++j, 0);
+		move(++j, list_left);
 
 		if (len)
 			findmarkentry(len, &pdents[i]);
 
-		printent(i, ncols, i == cur);
+		print_browser_entry(i, ncols, i == cur);
 	}
 
 	/* Must reset e.g. no files in dir */
@@ -8596,7 +8666,7 @@ static void redraw(char *path)
 
 	/* Go to last entry */
 	if (onscreen < ndents) {
-		move(xlines - 2, 0);
+		move(xlines - 2, list_left);
 #ifdef ICONS_ENABLED
 		addstr(ICON_ARROW_DOWN);
 #else
@@ -8606,7 +8676,11 @@ static void redraw(char *path)
 
 	markhovered();
 
-	if (cfg.preview)
+	if (list_left)
+		draw_parent_pane(path);
+	if (preview_border)
+		draw_file_pane(path);
+	else if (!pane_mode && cfg.preview)
 		preview_pane(path);
 }
 
@@ -8829,16 +8903,18 @@ nochange:
 		case SEL_CLICK:
 			if (getmouse(&event) != OK)
 				goto nochange;
+			if (pane_mode && (event.x < list_left || event.x >= list_right))
+				goto nochange;
 
 			/* Handle clicking on a context at the top */
 			if (event.bstate == BUTTON1_PRESSED && event.y == 0) {
 				/* Get context from: "[1 2 3 4]..." */
-				r = event.x >> 1;
+				r = (event.x - list_left) >> 1;
 
 				/* If clicked after contexts, go to parent */
-				if (r >= CTX_MAX)
+				if (r >= visible_context_count)
 					sel = SEL_BACK;
-				else if (r >= 0 && r != cfg.curctx) {
+				else if ((r = visible_contexts[r]) != cfg.curctx) {
 					savecurctx(path, ndents ? pdents[cur].name : NULL, r);
 
 					/* Reset the pointers */
@@ -9284,6 +9360,10 @@ nochange:
 				goto cdfalse_begin;
 			}
 			goto nochange;
+		case SEL_PARENT_PANE:
+			if (pane_mode)
+				parent_hidden = !parent_hidden;
+			continue;
 		case SEL_MFLTR: // fallthrough
 		case SEL_HIDDEN: // fallthrough
 		case SEL_DETAIL: // fallthrough
@@ -9364,6 +9444,10 @@ nochange:
 
 			switch (sel) {
 			case SEL_REDRAW:
+				if (pane_mode) {
+					file_preview.path[0] = '\0';
+					free_parent_pane();
+				}
 				refresh = TRUE;
 				break;
 			case SEL_RENAMEMUL:
@@ -9766,6 +9850,11 @@ nochange:
 
 			goto cdfalse_begin;
 		}
+		case SEL_GOTO_PATH:
+			if (!pane_mode)
+				goto nochange;
+			pkey = 'd';
+			// fallthrough
 		case SEL_PLUGIN:
 			/* Check if directory is accessible */
 			if (!xdiraccess(plgpath)) {
@@ -10425,6 +10514,7 @@ static bool set_tmp_path(void)
 
 static void cleanup(void)
 {
+	free_parent_pane();
 #ifndef NOX11
 	if (cfg.x11 && !g_state.picker) {
 		printf("\033[23;0t"); /* reset terminal window title */
@@ -10711,6 +10801,10 @@ int main(int argc, char *argv[])
 		return ret;
 	if ((ret = parse_opts(argc, argv, &ost)) != -1)
 		return ret;
+
+	pane_mode = !g_state.picker && !strcmp(xgetenv("NNN_PANES", ""), "1");
+	if (pane_mode)
+		cfg.preview = 1;
 
 	arg = ost.arg;
 	int sort = ost.sort, pkey = ost.pkey;

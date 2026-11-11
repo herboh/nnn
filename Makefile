@@ -181,7 +181,7 @@ endif
 
 DISTFILES = src nnn.1 Makefile README.md LICENSE
 SRC = src/nnn.c
-HEADERS = src/nnn.h
+HEADERS = src/nnn.h src/panes.h
 BIN = nnn
 DESKTOPFILE = misc/desktop/nnn.desktop
 LOGOSVG = misc/logo/logo.svg

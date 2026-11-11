@@ -114,6 +114,8 @@ enum action {
 	SEL_EXPORT,
 	SEL_TIMETYPE,
 	SEL_PREVIEW,
+	SEL_PARENT_PANE,
+	SEL_GOTO_PATH,
 	SEL_QUITCTX,
 	SEL_REOPENCTX,
 	SEL_QUITCD,
@@ -280,6 +282,8 @@ static struct key bindings[] = {
 	{ 'T',            SEL_TIMETYPE },
 	/* Toggle preview pane */
 	{ 'P',            SEL_PREVIEW },
+	{ '[',            SEL_PARENT_PANE },
+	{ ':',            SEL_GOTO_PATH },
 	/* Reopen the last closed context */
 	{ 'R',            SEL_REOPENCTX },
 	/* Quit a context */
