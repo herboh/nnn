@@ -870,7 +870,7 @@ static const char * const patterns[] = {
 #define C_UND (C_SOC + 1)   /* Unknown OR 0B regular/exe file: Red1 */
 
 #define C_PANE_HOVER 290
-#define C_PANE_IMAGE 300
+#define C_PANE_PREVIEW 300
 
 static const char gcolors[] = "c1e2272e006033f7c6d6abc4";
 static uint_t fcolors[C_UND + 1] = {0};
@@ -2513,9 +2513,6 @@ static bool initcurses(void *oldmask)
 			if (pane_mode && COLOR_PAIRS > C_PANE_HOVER + i)
 				init_pair(C_PANE_HOVER + i, COLOR_BLACK, *pcode);
 		}
-		if (pane_mode && COLORS >= COLOR_256 && COLOR_PAIRS >= C_PANE_IMAGE + 216)
-			for (short i = 0; i < 216; ++i)
-				init_pair(C_PANE_IMAGE + i, 16 + i, -1);
 	}
 #ifdef ICONS_ENABLED
 	if (!g_state.oldcolor) {
@@ -3216,6 +3213,33 @@ static void write_lastdir(const char *curpath, const char *outfile)
 	}
 	if (!ok)
 		errexit();
+}
+
+static void write_shell_cwd(const char *path)
+{
+	const char *outfile = getenv("NNN_CWD_FILE");
+	if (!outfile || !*outfile)
+		return;
+
+	/* List mode uses a temporary tree. Return its underlying directory. */
+	char realdir[PATH_MAX];
+	size_t prefix = listpath ? strlen(listpath) : 0;
+	if (prefix && listroot && !strncmp(path, listpath, prefix)
+	    && (!path[prefix] || path[prefix] == '/')) {
+		int len = snprintf(realdir, sizeof(realdir), "%s%s", listroot, path + prefix);
+		if (len < 0 || (size_t)len >= sizeof(realdir))
+			return;
+		path = realdir;
+	}
+
+	int fd = open(outfile, O_WRONLY | O_TRUNC);
+	if (fd < 0)
+		return;
+	size_t size = strlen(path) + 1;
+	ssize_t written = write(fd, path, size);
+	if (written < 0 || (size_t)written != size)
+		(void)ftruncate(fd, 0);
+	close(fd);
 }
 
 /*
@@ -6485,7 +6509,7 @@ static void show_help(const char *path)
 	"0\n"
 	"1MISC\n"
 	      "8Alt ;  Select plugin%11=  Launch app\n"
-	       "9! ^]  Shell%19]  Cmd prompt\n"
+	       "9! ^]  Shell%19\"  Cmd prompt\n"
 		  "cc  Connect remote%10u  Unmount remote/archive\n"
 	       "9t ^T  Sort toggles%12s  Manage session\n"
 		  "cT  Set time type%110  Lock\n"
@@ -6534,7 +6558,7 @@ static void show_help(const char *path)
 		if (g_ctx[i].c_cfg.ctxactive)
 			fprintf(f, " %u%c %s\n", i + 1, (cfg.curctx == i) ? '*' : ' ', g_ctx[i].c_path);
 	if (pane_mode)
-		fprintf(f, "\nPANES\n [  Parent pane\n P  Preview pane\n :  Go to directory\n");
+		fprintf(f, "\nPANES\n [  Parent pane\n ] P  Preview pane\n :  Go to directory\n");
 
 	fprintf(f, "\nVOLUME: avail:%s ", coolsize(get_fs_info(path, VFS_AVAIL)));
 	fprintf(f, "used:%s ", coolsize(get_fs_info(path, VFS_USED)));
@@ -10064,8 +10088,11 @@ nochange:
 					selbufpos = 0;
 			}
 
-			if (sel != SEL_QUITERR)
+			if (sel != SEL_QUITERR) {
+				if (!g_state.picker)
+					write_shell_cwd(path);
 				return EXIT_SUCCESS;
+			}
 
 			if (selbufpos && !g_state.picker) {
 				/* Pick files to stdout and exit */

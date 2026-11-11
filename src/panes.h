@@ -26,7 +26,7 @@ static bool same_pane_file(const struct stat *a, const struct stat *b)
 	       && NSEC_CTIME(*a) == NSEC_CTIME(*b);
 }
 
-static void pane_text(const char *text, size_t length, int columns)
+static int pane_text(const char *text, size_t length, int columns)
 {
 #ifndef NOLC
 	mbstate_t state = {0};
@@ -52,13 +52,14 @@ static void pane_text(const char *text, size_t length, int columns)
 			width = 1;
 		}
 		if (width > columns)
-			break;
+			return 0;
 		addnwstr(&ch, 1);
 		text += bytes;
 		length -= bytes;
 		columns -= width;
 #endif
 	}
+	return columns;
 }
 
 static void pane_title(int column, int width, const char *title)
@@ -156,29 +157,163 @@ static int pane_cube(unsigned char value)
 	return value < 48 ? 0 : (value < 115 ? 1 : (value - 35) / 40);
 }
 
+static int pane_rgb(int r, int g, int b)
+{
+	static const int cube[] = {0, 95, 135, 175, 215, 255};
+	int x = pane_cube(r), y = pane_cube(g), z = pane_cube(b);
+	int gray = MIN(23, MAX(0, ((r + g + b) / 3 - 3) / 10));
+	int level = 8 + 10 * gray;
+	int dx = r - cube[x], dy = g - cube[y], dz = b - cube[z];
+	int dr = r - level, dg = g - level, db = b - level;
+	if (dr * dr + dg * dg + db * db < dx * dx + dy * dy + dz * dz)
+		return 232 + gray;
+	return 16 + 36 * x + 6 * y + z;
+}
+
+static void pane_color(attr_t attrs, int fg, int bg)
+{
+	static ushort_t pairs[257][257];
+	static int next = C_PANE_PREVIEW;
+	int pair = 0;
+
+	if ((fg >= 0 || bg >= 0) && fg < COLORS && bg < COLORS) {
+		ushort_t *cached = &pairs[fg + 1][bg + 1];
+		if (!*cached && next < COLOR_PAIRS && next <= UINT16_MAX) {
+#ifdef NCURSES_EXT_COLORS
+			if (init_extended_pair(next, fg, bg) == OK)
+#else
+			if (next <= SHRT_MAX && init_pair(next, fg, bg) == OK)
+#endif
+				*cached = next++;
+		}
+		pair = *cached;
+	}
+#ifdef NCURSES_EXT_COLORS
+	attr_set(attrs, 0, &pair);
+#else
+	attr_set(attrs, pair, NULL);
+#endif
+}
+
+struct pane_style {
+	attr_t attrs;
+	int fg, bg;
+};
+
+static void pane_sgr(struct pane_style *style, const char *p, const char *end)
+{
+	int codes[24] = {0}, count = 1;
+	for (; p < end; ++p) {
+		if (*p == ';' && count < (int)ELEMENTS(codes))
+			++count;
+		else if (xisdigit(*p) && codes[count - 1] < 100)
+			codes[count - 1] = 10 * codes[count - 1] + (*p - '0');
+		else
+			return;
+	}
+
+	for (int i = 0; i < count; ++i) {
+		int code = codes[i];
+		if (!code)
+			*style = (struct pane_style){A_NORMAL, -1, -1};
+		else if (code == 1)
+			style->attrs |= A_BOLD;
+		else if (code == 2)
+			style->attrs |= A_DIM;
+		else if (code == 3)
+			style->attrs |= A_ITALIC;
+		else if (code == 4)
+			style->attrs |= A_UNDERLINE;
+		else if (code == 22)
+			style->attrs &= ~(A_BOLD | A_DIM);
+		else if (code == 23)
+			style->attrs &= ~A_ITALIC;
+		else if (code == 24)
+			style->attrs &= ~A_UNDERLINE;
+		else if (code == 39 || code == 49)
+			*(code == 39 ? &style->fg : &style->bg) = -1;
+		else if (code >= 30 && code <= 37)
+			style->fg = code - 30;
+		else if (code >= 40 && code <= 47)
+			style->bg = code - 40;
+		else if (code >= 90 && code <= 97)
+			style->fg = code - 82;
+		else if (code >= 100 && code <= 107)
+			style->bg = code - 92;
+		else if ((code == 38 || code == 48) && i + 2 < count) {
+			int *color = code == 38 ? &style->fg : &style->bg;
+			if (codes[i + 1] == 5 && codes[i + 2] <= 255) {
+				*color = codes[i + 2];
+				i += 2;
+			} else if (codes[i + 1] == 2 && i + 4 < count
+				   && codes[i + 2] <= 255 && codes[i + 3] <= 255 && codes[i + 4] <= 255) {
+				*color = pane_rgb(codes[i + 2], codes[i + 3], codes[i + 4]);
+				i += 4;
+			}
+		}
+	}
+	pane_color(style->attrs, style->fg, style->bg);
+}
+
+static void pane_markdown(const char *line, const char *end, int columns, struct pane_style *style)
+{
+	while (line < end) {
+		const char *esc = memchr(line, '\033', end - line);
+		if (!esc) {
+			pane_text(line, end - line, columns);
+			break;
+		}
+		columns = pane_text(line, esc - line, columns);
+		line = esc + 1;
+		if (line == end)
+			break;
+		if (*line == '[') {
+			const char *params = ++line;
+			while (line < end && ((unsigned char)*line < '@' || (unsigned char)*line > '~'))
+				++line;
+			if (line < end && *line == 'm')
+				pane_sgr(style, params, line);
+		} else if (*line == ']') {
+			/* Glow can include OSC 8 hyperlinks. Keep the link text only. */
+			while (++line < end && *line != '\a') {
+				if (*line == '\033' && line + 1 < end && line[1] == '\\') {
+					++line;
+					break;
+				}
+			}
+		}
+		if (line < end)
+			++line;
+	}
+}
+
 static bool draw_pane_image(int column, int columns, int rows)
 {
 	int width, height, offset = 0;
 	unsigned char *data = file_preview.data + 1;
 	if (sscanf((const char *)data, "P6\n%d %d\n255%n", &width, &height, &offset) != 2
 	    || offset <= 0 || data[offset] != '\n' || width < 1 || width > columns
-	    || height < 1 || height > rows
+	    || height < 1 || height > rows * 2
 	    || (size_t)width * height * 3 + (size_t)offset + 2 > file_preview.length
-	    || COLORS < COLOR_256 || COLOR_PAIRS < C_PANE_IMAGE + 216)
+	    || COLORS < COLOR_256 || COLOR_PAIRS <= C_PANE_PREVIEW)
 		return FALSE;
 
 	data += offset + 1;
-	int previous = -1;
-	for (int y = 0; y < height; ++y) {
-		move(y + 2, column);
-		for (int x = 0; x < width; ++x, data += 3) {
-			int color = 36 * pane_cube(data[0]) + 6 * pane_cube(data[1]) + pane_cube(data[2]);
-			if (color != previous) {
-				attr_set(A_NORMAL, C_PANE_IMAGE + color, NULL);
-				previous = color;
+	int prev_fg = -2, prev_bg = -2;
+	for (int y = 0; y < height; y += 2) {
+		move(y / 2 + 2, column);
+		for (int x = 0; x < width; ++x) {
+			const unsigned char *top = data + 3 * (y * width + x);
+			const unsigned char *bottom = top + width * 3;
+			int fg = pane_rgb(top[0], top[1], top[2]);
+			int bg = y + 1 < height ? pane_rgb(bottom[0], bottom[1], bottom[2]) : -1;
+			if (fg != prev_fg || bg != prev_bg) {
+				pane_color(A_NORMAL, fg, bg);
+				prev_fg = fg;
+				prev_bg = bg;
 			}
 #ifndef NOLC
-			addwstr(L"█");
+			addwstr(L"▀");
 #else
 			addch('#');
 #endif
@@ -210,7 +345,7 @@ static void load_pane_preview(char *path, const struct stat *info, int width, in
 	char cols[16], rows[16];
 	snprintf(cols, sizeof(cols), "%d", width);
 	snprintf(rows, sizeof(rows), "%d", height);
-	char *argv[] = {previewer, path, cols, rows, "pane", cfg.showhidden ? "all" : "", NULL};
+	char *argv[] = {previewer, path, cols, rows, "rich-pane", cfg.showhidden ? "all" : "", NULL};
 	pid_t child;
 	int status = spawn_redirected(previewer, argv, pipefd[0], pipefd[1], &child);
 	close(pipefd[1]);
@@ -251,21 +386,29 @@ static void draw_file_pane(const char *path)
 		load_pane_preview(target, &info, width, rows);
 	if (!file_preview.length)
 		return;
-	if (!file_preview.data[0]) {
+	bool markdown = file_preview.length >= 2 && !file_preview.data[0] && file_preview.data[1] == 'M';
+	if (!file_preview.data[0] && !markdown) {
 		if (!draw_pane_image(column, width, rows))
 			mvaddnstr(2, column, "Image preview unavailable", width);
 		return;
 	}
 
-	const char *line = (const char *)file_preview.data;
-	const char *end = line + file_preview.length;
+	const char *data = (const char *)file_preview.data;
+	const char *line = data + (markdown ? 2 : 0);
+	const char *end = data + file_preview.length;
+	struct pane_style style = {A_NORMAL, -1, -1};
 	for (int row = 2; row < xlines - 1 && line < end; ++row) {
 		const char *next = memchr(line, '\n', end - line);
 		const char *stop = next ? next : end;
 		if (stop > line && stop[-1] == '\r')
 			--stop;
 		move(row, column);
-		pane_text(line, stop - line, width);
+		if (markdown)
+			pane_markdown(line, stop, width, &style);
+		else
+			pane_text(line, stop - line, width);
 		line = next ? next + 1 : end;
 	}
+	if (markdown)
+		attr_set(A_NORMAL, 0, NULL);
 }

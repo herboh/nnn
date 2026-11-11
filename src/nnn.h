@@ -271,7 +271,7 @@ static struct key bindings[] = {
 	/* Launcher */
 	{ '=',            SEL_LAUNCH },
 	/* Show command prompt */
-	{ ']',            SEL_PROMPT },
+	{ '"',            SEL_PROMPT },
 	/* Lock screen */
 	{ '0',            SEL_LOCK },
 	/* Manage sessions */
@@ -282,6 +282,7 @@ static struct key bindings[] = {
 	{ 'T',            SEL_TIMETYPE },
 	/* Toggle preview pane */
 	{ 'P',            SEL_PREVIEW },
+	{ ']',            SEL_PREVIEW },
 	{ '[',            SEL_PARENT_PANE },
 	{ ':',            SEL_GOTO_PATH },
 	/* Reopen the last closed context */
